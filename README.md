@@ -3,7 +3,7 @@
 This repository contains the core algorithms and statistical analysis scripts used in our study. The scripts demonstrate the core logic of the MR system (gesture detection and precision alignment task) and generate the figures presented in the manuscript, based on the anonymized clinical and training data of three participants (A001, A002, and A003).
 
 ## Repository Structure
-
+```
 MR-Rehab-System/
 ├── README.md
 ├── data/
@@ -23,7 +23,7 @@ MR-Rehab-System/
     ├── train2_posture_restriction_plot_mdpi.py     # Generates Figure 7 (Posture restriction impact)
     ├── train2_shots_and_hit_rate_plot_mdpi.py      # Generates Figure 8 (Total shots and hit rate)
     └── train4_stacking_and_area_plot_mdpi.py       # Generates Figures 9 & 10 (Stacking accuracy and movement economy)
-
+```
 ## Core Algorithms (Unity C# Scripts)
 
 The `core_algorithms/` folder contains two complete Unity C# scripts that implement the key mathematical models described in the manuscript.
