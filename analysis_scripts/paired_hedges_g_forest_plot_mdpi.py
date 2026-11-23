@@ -11,27 +11,121 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# --- 1. Font and global settings ---
-plt.rcParams['font.sans-serif'] = ['Arial']
-plt.rcParams['axes.unicode_minus'] = False
+# =========================================================
+# 1. Font and global settings
+# =========================================================
+plt.rcParams['font.sans-serif'] = ['Arial', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = True
+plt.rcParams['mathtext.fontset'] = 'dejavusans'
 
-# --- 2. Load and preprocess data ---
+# =========================================================
+# 2. Load and preprocess data
+# =========================================================
 file_path = 'participant_clinical_outcomes.csv'
-df = pd.read_csv(file_path)
 
-df_bbt = df[df['Assessment'] == 'BBT'].copy()
-df_nhpt = df[df['Assessment'] == 'NHPT'].copy()
+df = pd.read_csv(file_path, encoding='utf-8-sig')
+df.columns = df.columns.str.strip()
 
+print("CSV columns:", df.columns.tolist())
+
+df_bbt = df[
+    df['Assessment'].astype(str).str.strip().str.upper() == 'BBT'
+].copy()
+
+df_nhpt = df[
+    df['Assessment'].astype(str).str.strip().str.upper() == 'NHPT'
+].copy()
+
+participant_order = ['A001', 'A002', 'A003']
+
+# Automatically detect a participant ID column.
+id_candidates = [
+    'Participant',
+    'Participant_ID',
+    'Participant ID',
+    'ID',
+    'Subject',
+    'Subject_ID',
+    'Subject ID'
+]
+
+id_col = next(
+    (col for col in id_candidates if col in df.columns),
+    None
+)
+
+if id_col is not None:
+    print(f"Participant ID column detected: {id_col}")
+
+    for subset in [df_bbt, df_nhpt]:
+        subset[id_col] = (
+            subset[id_col].astype(str).str.strip().str.upper()
+        )
+
+    df_bbt = (
+        df_bbt.set_index(id_col)
+        .loc[participant_order]
+        .reset_index()
+    )
+
+    df_nhpt = (
+        df_nhpt.set_index(id_col)
+        .loc[participant_order]
+        .reset_index()
+    )
+
+else:
+    print(
+        "No participant ID column found. "
+        "Using original CSV row order: A001, A002, A003."
+    )
+
+    df_bbt = df_bbt.reset_index(drop=True)
+    df_nhpt = df_nhpt.reset_index(drop=True)
+
+# Check participant count
+if len(df_bbt) != 3 or len(df_nhpt) != 3:
+    raise ValueError(
+        "Expected exactly 3 BBT rows and 3 NHPT rows. "
+        "Please check the CSV."
+    )
+
+# Calculate affected-hand averages (left hand)
 for phase in ['Baseline', 'Final']:
-    df_bbt[f'{phase}_Left_Avg'] = df_bbt[[f'{phase}_Left_1', f'{phase}_Left_2']].mean(axis=1)
-    df_nhpt[f'{phase}_Left_Avg'] = df_nhpt[[f'{phase}_Left_1', f'{phase}_Left_2']].mean(axis=1)
+    for subset in [df_bbt, df_nhpt]:
+        columns = [
+            f'{phase}_Left_1',
+            f'{phase}_Left_2'
+        ]
 
-# --- 3. Statistical calculation (Paired Hedges' g) ---
-def calculate_hedges_g(pre_scores, post_scores, is_lower_better=False):
-    pre = np.array(pre_scores)
-    post = np.array(post_scores)
+        subset[f'{phase}_Left_Avg'] = (
+            subset[columns].mean(axis=1)
+        )
+
+print("\nBBT affected-hand data:")
+print(df_bbt[
+    ['Baseline_Left_Avg', 'Final_Left_Avg']
+].to_string(index=False))
+
+print("\nNHPT affected-hand data:")
+print(df_nhpt[
+    ['Baseline_Left_Avg', 'Final_Left_Avg']
+].to_string(index=False))
+
+# =========================================================
+# 3. Statistical calculation (Paired Hedges' g)
+# =========================================================
+def calculate_hedges_g(
+    pre_scores,
+    post_scores,
+    is_lower_better=False
+):
+    pre = np.asarray(pre_scores, dtype=float)
+    post = np.asarray(post_scores, dtype=float)
+
     N = len(pre)
 
+    # Positive change means improvement.
     if is_lower_better:
         diffs = pre - post
     else:
@@ -40,93 +134,245 @@ def calculate_hedges_g(pre_scores, post_scores, is_lower_better=False):
     mean_diff = np.mean(diffs)
     sd_diff = np.std(diffs, ddof=1)
 
-    d_z = mean_diff / sd_diff if sd_diff != 0 else 0
+    if N < 2 or sd_diff == 0 or not np.isfinite(sd_diff):
+        raise ValueError(
+            "Cannot calculate standardized changes: "
+            "invalid sample size or change-score SD."
+        )
 
-    if N > 1:
-        j_factor = 1 - (3 / (4 * N - 5))
-        g = d_z * j_factor
-    else:
-        g = 0
-        j_factor = 0
+    # Paired standardized mean difference
+    d_z = mean_diff / sd_diff
 
-    individual_g = (diffs / sd_diff) * j_factor if sd_diff != 0 else np.zeros(N)
+    # Small-sample correction
+    j_factor = 1 - 3 / (4 * N - 5)
+
+    # Group Hedges' g
+    g = d_z * j_factor
+
+    # Individual standardized changes
+    # Common group SD and correction factor
+    individual_g = (diffs / sd_diff) * j_factor
+
     return g, individual_g
 
-bbt_pre = df_bbt['Baseline_Left_Avg'].tolist()
-bbt_post = df_bbt['Final_Left_Avg'].tolist()
-nhpt_pre = df_nhpt['Baseline_Left_Avg'].tolist()
-nhpt_post = df_nhpt['Final_Left_Avg'].tolist()
 
-g_bbt, ind_g_bbt = calculate_hedges_g(bbt_pre, bbt_post, is_lower_better=False)
-g_nhpt, ind_g_nhpt = calculate_hedges_g(nhpt_pre, nhpt_post, is_lower_better=True)
+bbt_pre = df_bbt['Baseline_Left_Avg'].to_numpy()
+bbt_post = df_bbt['Final_Left_Avg'].to_numpy()
 
+nhpt_pre = df_nhpt['Baseline_Left_Avg'].to_numpy()
+nhpt_post = df_nhpt['Final_Left_Avg'].to_numpy()
+
+g_bbt, ind_g_bbt = calculate_hedges_g(
+    bbt_pre,
+    bbt_post,
+    is_lower_better=False
+)
+
+g_nhpt, ind_g_nhpt = calculate_hedges_g(
+    nhpt_pre,
+    nhpt_post,
+    is_lower_better=True
+)
+
+print("\n========== RESULTS ==========")
 print(f"BBT Group Hedges' g = {g_bbt:.2f}")
 print(f"NHPT Group Hedges' g = {g_nhpt:.2f}")
-print(f"BBT Individual g values: {ind_g_bbt}")
-print(f"NHPT Individual g values: {ind_g_nhpt}")
 
-# --- 4. Plotting ---
+print("\nIndividual standardized changes:")
+
+for i, pid in enumerate(participant_order):
+    print(
+        f"{pid}: "
+        f"BBT = {ind_g_bbt[i]:.3f}, "
+        f"NHPT = {ind_g_nhpt[i]:.3f}"
+    )
+
+# =========================================================
+# 4. Plotting
+# =========================================================
 fig, ax = plt.subplots(figsize=(9, 4.5), dpi=300)
 
 y_bbt = 1
 y_nhpt = 0
 
-# Dynamically calculate the end of the horizontal lines
-all_values = list(ind_g_bbt) + list(ind_g_nhpt) + [g_bbt, g_nhpt]
-line_end = max(all_values) + 0.4
-line_start = 0.0
+all_values = np.concatenate([
+    ind_g_bbt,
+    ind_g_nhpt,
+    [g_bbt, g_nhpt]
+])
 
-# Draw vertical effect size threshold lines
-for threshold in [0.2, 0.5, 0.8]:
-    ax.axvline(x=threshold, color='gray', linestyle='--', linewidth=0.8, alpha=0.6, zorder=0)
+line_start = min(0.0, np.min(all_values) - 0.1)
+line_end = np.max(all_values) + 0.4
 
-# Threshold labels
-ax.text(0.2, 1.75, 'Small (0.2)', color='gray', fontsize=9, fontstyle='italic', ha='center', va='bottom')
-ax.text(0.5, 1.75, 'Moderate (0.5)', color='gray', fontsize=9, fontstyle='italic', ha='center', va='bottom')
-ax.text(0.8, 1.75, 'Large (0.8)', color='gray', fontsize=9, fontstyle='italic', ha='center', va='bottom')
+# No conventional effect-size threshold lines
+# No Small / Moderate / Large labels
 
-# --- Plot BBT ---
-ax.plot([line_start, line_end], [y_bbt, y_bbt], color='lightgray', linestyle='-', linewidth=1.2, zorder=1)
+# ---------------------------------------------------------
+# 5. BBT
+# ---------------------------------------------------------
+ax.plot(
+    [line_start, line_end],
+    [y_bbt, y_bbt],
+    color='lightgray',
+    linewidth=1.2,
+    zorder=1
+)
+
 for i, val in enumerate(ind_g_bbt):
-    ax.scatter(val, y_bbt, color='black', s=40, zorder=3,
-               label='Individual Standardized Change' if i == 0 else "")
-    ax.text(val, y_bbt + 0.15, f'A00{i+1}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+    ax.scatter(
+        val, y_bbt,
+        color='black',
+        s=40,
+        zorder=3,
+        label=(
+            'Individual Standardized Change'
+            if i == 0 else None
+        )
+    )
 
-# --- Plot NHPT ---
-ax.plot([line_start, line_end], [y_nhpt, y_nhpt], color='lightgray', linestyle='-', linewidth=1.2, zorder=1)
+    ax.text(
+        val,
+        y_bbt + 0.15,
+        participant_order[i],
+        ha='center',
+        va='bottom',
+        fontsize=9,
+        fontweight='bold'
+    )
 
-# Handle NHPT label overlap
-nhpt_sorted = sorted(enumerate(ind_g_nhpt), key=lambda x: x[1])
+# ---------------------------------------------------------
+# 6. NHPT
+# ---------------------------------------------------------
+ax.plot(
+    [line_start, line_end],
+    [y_nhpt, y_nhpt],
+    color='lightgray',
+    linewidth=1.2,
+    zorder=1
+)
+
+nhpt_sorted = sorted(
+    enumerate(ind_g_nhpt),
+    key=lambda x: x[1]
+)
+
 for rank, (i, val) in enumerate(nhpt_sorted):
-    ax.scatter(val, y_nhpt, color='black', s=40, zorder=3)
-    if rank > 0 and abs(val - nhpt_sorted[rank-1][1]) < 0.15:
+
+    ax.scatter(
+        val, y_nhpt,
+        color='black',
+        s=40,
+        zorder=3
+    )
+
+    # Avoid overlapping participant labels
+    if (
+        rank > 0
+        and abs(val - nhpt_sorted[rank-1][1]) < 0.15
+    ):
         if rank % 2 == 1:
-            ax.text(val - 0.08, y_nhpt + 0.15, f'A00{i+1}', ha='right', va='bottom', fontsize=9, fontweight='bold')
+            ax.text(
+                val - 0.08,
+                y_nhpt + 0.15,
+                participant_order[i],
+                ha='right',
+                va='bottom',
+                fontsize=9,
+                fontweight='bold'
+            )
         else:
-            ax.text(val + 0.08, y_nhpt + 0.15, f'A00{i+1}', ha='left', va='bottom', fontsize=9, fontweight='bold')
+            ax.text(
+                val + 0.08,
+                y_nhpt + 0.15,
+                participant_order[i],
+                ha='left',
+                va='bottom',
+                fontsize=9,
+                fontweight='bold'
+            )
     else:
-        ax.text(val, y_nhpt + 0.15, f'A00{i+1}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+        ax.text(
+            val,
+            y_nhpt + 0.15,
+            participant_order[i],
+            ha='center',
+            va='bottom',
+            fontsize=9,
+            fontweight='bold'
+        )
 
-# --- Plot group effect sizes (diamond markers) ---
-ax.scatter(g_bbt, y_bbt, color='#D55E00', marker='D', s=140, zorder=4,
-           edgecolor='white', linewidth=1.5, label="Group Effect Size (Hedges' $g$)")
-ax.scatter(g_nhpt, y_nhpt, color='#D55E00', marker='D', s=140, zorder=4,
-           edgecolor='white', linewidth=1.5)
+# ---------------------------------------------------------
+# 7. Group Hedges' g (orange diamonds)
+# ---------------------------------------------------------
+ax.scatter(
+    g_bbt,
+    y_bbt,
+    color='#D55E00',
+    marker='D',
+    s=140,
+    zorder=4,
+    edgecolor='white',
+    linewidth=1.5,
+    label="Group Effect Size (Hedges' $g$)"
+)
 
-# Numeric labels below the diamonds
-ax.text(g_bbt, y_bbt - 0.15, f"$g$ = {g_bbt:.2f}", ha='center', va='top', fontsize=11, fontweight='bold')
-ax.text(g_nhpt, y_nhpt - 0.15, f"$g$ = {g_nhpt:.2f}", ha='center', va='top', fontsize=11, fontweight='bold')
+ax.scatter(
+    g_nhpt,
+    y_nhpt,
+    color='#D55E00',
+    marker='D',
+    s=140,
+    zorder=4,
+    edgecolor='white',
+    linewidth=1.5
+)
 
-# Y-axis settings
+# Group labels
+ax.text(
+    g_bbt,
+    y_bbt - 0.15,
+    rf"$g$ = {g_bbt:.2f}",
+    ha='center',
+    va='top',
+    fontsize=11,
+    fontweight='bold'
+)
+
+ax.text(
+    g_nhpt,
+    y_nhpt - 0.15,
+    rf"$g$ = {g_nhpt:.2f}",
+    ha='center',
+    va='top',
+    fontsize=11,
+    fontweight='bold'
+)
+
+# =========================================================
+# 8. Axes and styling
+# =========================================================
 ax.set_yticks([y_nhpt, y_bbt])
-ax.set_yticklabels(['NHPT', 'BBT'], fontsize=13, fontweight='bold')
-ax.set_ylim(-0.5, 2.0)
 
-# X-axis settings
-ax.set_xlabel("Hedges' $g$", fontsize=14, labelpad=10)
-ax.set_xlim(0.0, max(1.8, line_end))
+ax.set_yticklabels(
+    ['NHPT', 'BBT'],
+    fontsize=13,
+    fontweight='bold'
+)
 
-# Remove top and right spines
+ax.set_ylim(-0.5, 1.65)
+
+# Updated X-axis label
+ax.set_xlabel(
+    'Standardized Change',
+    fontsize=14,
+    labelpad=10
+)
+
+ax.set_xlim(
+    line_start,
+    max(1.8, line_end)
+)
+
 ax.spines['top'].set_visible(False)
 ax.spines['right'].set_visible(False)
 ax.tick_params(axis='y', length=0)
@@ -134,9 +380,32 @@ ax.tick_params(axis='y', length=0)
 # Legend
 handles, labels = ax.get_legend_handles_labels()
 by_label = dict(zip(labels, handles))
-ax.legend(by_label.values(), by_label.keys(), loc='lower right',
-          framealpha=1.0, edgecolor='black', fontsize=10)
 
+ax.legend(
+    by_label.values(),
+    by_label.keys(),
+    loc='lower right',
+    framealpha=1.0,
+    edgecolor='black',
+    fontsize=10
+)
+
+# =========================================================
+# 9. Save and display
+# =========================================================
 plt.tight_layout()
-plt.savefig('Hedges_g_ForestPlot.png', dpi=300, bbox_inches='tight', pad_inches=0.05)
+
+plt.savefig(
+    'Hedges_g_ForestPlot.png',
+    dpi=300,
+    bbox_inches='tight',
+    pad_inches=0.05
+)
+
+plt.savefig(
+    'Hedges_g_ForestPlot.pdf',
+    bbox_inches='tight',
+    pad_inches=0.05
+)
+
 plt.show()

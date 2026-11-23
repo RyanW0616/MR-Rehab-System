@@ -7,155 +7,125 @@ Original file is located at
     https://colab.research.google.com/drive/1QChbfB__38ZbI_ca_xS8AjC1_GYIfMj_
 """
 
-import pandas as pd
-import numpy as np
+from pathlib import Path
+import argparse
+import math
+
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+from matplotlib import font_manager
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 from matplotlib.ticker import MaxNLocator
-import os
+import numpy as np
+import pandas as pd
 
-# ==========================================
-# 1. Global font and academic journal formatting
-# ==========================================
-plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['font.sans-serif'] = ['Arial']
-plt.rcParams['axes.unicode_minus'] = False
 
-plt.rcParams.update({
-    'font.size': 12,
-    'axes.labelsize': 14,
-    'xtick.labelsize': 12,
-    'ytick.labelsize': 12,
-    'legend.fontsize': 11
-})
+PARTICIPANTS = ('A001', 'A002', 'A003')
 
-# ==========================================
-# 2. Data loading and preprocessing function (Robust version)
-# ==========================================
-def load_and_clean_data(file_path):
-    # Use encoding='utf-8-sig' to handle BOM characters often found in Excel-generated CSVs
-    df = pd.read_csv(file_path, encoding='utf-8-sig')
 
-    # Strip whitespace from column names
-    df.columns = df.columns.str.strip()
+def setup_style():
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    font = next((name for name in ('Arial', 'Liberation Sans', 'DejaVu Sans') if name in available), 'sans-serif')
+    plt.rcParams.update({
+        'font.family': font,
+        'axes.unicode_minus': False,
+        'font.size': 12,
+        'axes.labelsize': 14,
+        'xtick.labelsize': 12,
+        'ytick.labelsize': 12,
+        'legend.fontsize': 11,
+    })
 
-    # Standardize column names to lowercase to handle both 'Total_Shots' and 'total_shots'
-    df.columns = [c.lower() for c in df.columns]
 
-    # Rename using the standardized lowercase mapping
-    column_mapping = {
-        '日期': 'date',
-        'total_shots': 'total_shots',
-        'score': 'score',
-        'posture_rule': 'posture_rule'
-    }
-    df = df.rename(columns=column_mapping)
+def load_data(path):
+    data = pd.read_csv(path, encoding='utf-8-sig')
+    data.columns = data.columns.str.strip()
+    required = {'Date', 'Total_Shots', 'Score', 'Posture_Rule'}
+    if not required.issubset(data.columns):
+        raise ValueError(f'{path.name}: missing columns {sorted(required - set(data.columns))}')
 
-    # Convert numeric columns
-    df['total_shots'] = pd.to_numeric(df['total_shots'], errors='coerce')
-    df['score'] = pd.to_numeric(df['score'], errors='coerce')
+    data = data.dropna(how='all').reset_index(drop=True)
+    for column in ('Total_Shots', 'Score'):
+        data[column] = pd.to_numeric(data[column], errors='raise')
+    if (data['Total_Shots'] <= 0).any() or (data['Score'] < 0).any() or (data['Score'] > data['Total_Shots']).any():
+        raise ValueError(f'{path.name}: invalid shot or score values')
 
-    # Fill missing dates (forward fill)
-    df['date'] = df['date'].ffill()
+    flags = data['Posture_Rule'].fillna('').astype(str).str.strip()
+    if not flags.isin(('', 'F')).all():
+        raise ValueError(f'{path.name}: unexpected Posture_Rule values: {sorted(set(flags) - {"", "F"})}')
 
-    # Handle Posture_Rule: blank means Strict, 'F' means Unrestricted
-    df['posture_rule'] = df['posture_rule'].fillna('Strict').replace('F', 'Unrestricted')
+    restricted = data.loc[flags.eq('')].copy().reset_index(drop=True)
+    if restricted.empty:
+        raise ValueError(f'{path.name}: no restricted-posture game runs')
+    restricted['Order'] = np.arange(1, len(restricted) + 1)
+    restricted['Hit_Rate'] = 100 * restricted['Score'] / restricted['Total_Shots']
+    restricted['Shots_Trend'] = restricted['Total_Shots'].rolling(window=3, min_periods=1).mean()
+    return restricted
 
-    # Calculate accuracy
-    df['accuracy'] = (df['score'] / df['total_shots']) * 100
 
-    # Extract only the "Strict Posture" phase (True Motor Control)
-    strict_data = df[df['posture_rule'] == 'Strict'].reset_index(drop=True)
-    strict_data['Order'] = strict_data.index + 1
-    return strict_data
-
-# ==========================================
-# 3. Load data and calculate global Y-axis
-# ==========================================
-file_names = {
-    'A001': 'A001_data_train2.csv',
-    'A002': 'A002_data_train2.csv',
-    'A003': 'A003_data_train2.csv'
-}
-
-print("="*50)
-print("Processing train2 data and generating individual plots")
-print("="*50)
-
-participants_data = {}
-global_max_shots = 20
-
-for pid, fname in file_names.items():
-    if os.path.exists(fname):
-        p_data = load_and_clean_data(fname)
-        participants_data[pid] = p_data
-        if not p_data.empty:
-            global_max_shots = max(global_max_shots, p_data['total_shots'].max())
-    else:
-        print(f"File not found: {fname}")
-
-MAX_SHOTS_Y = (global_max_shots // 10 + 1) * 10
-
-# ==========================================
-# 4. Plot and export 3 individual figures
-# ==========================================
-color_bar = '#aec7e8'
-color_trend = '#1f77b4'
-color_acc = '#ff7f0e'
-
-for pid, p_data in participants_data.items():
-    if p_data.empty:
-        print(f"⚠️ Skipping plot: {pid} has no valid data")
-        continue
-
+def plot_figure(participant, data, y_max, output_path):
     fig, ax = plt.subplots(figsize=(6, 5), dpi=300)
-    x_val = p_data['Order']
+    x = data['Order'].to_numpy()
 
-    # Left Y-axis: Total Shots per Session (Bar chart)
-    ax.bar(x_val, p_data['total_shots'], color=color_bar, alpha=0.8, width=0.6)
-
-    # Left Y-axis: Shots Trend (Rolling Mean)
-    trend_shots = p_data['total_shots'].rolling(window=3, min_periods=1).mean()
-    ax.plot(x_val, trend_shots, color=color_trend, linestyle='--', linewidth=2.5, alpha=0.9)
-
+    ax.bar(x, data['Total_Shots'], color='#aec7e8', alpha=0.8, width=0.6)
+    ax.plot(x, data['Shots_Trend'], color='#1f77b4', linestyle='--',
+            linewidth=2.5, alpha=0.9)
     ax.set_ylabel('Total Shots', fontweight='bold')
-    ax.set_ylim(0, MAX_SHOTS_Y)
+    ax.set_ylim(0, y_max)
 
-    # Right Y-axis: Hit Rate (Line chart)
-    ax_twin = ax.twinx()
-    ax_twin.plot(x_val, p_data['accuracy'], marker='o', color=color_acc, linewidth=2.5)
-    ax_twin.set_ylabel('Hit Rate (%)', color=color_acc, fontweight='bold')
-    ax_twin.tick_params(axis='y', colors=color_acc)
-    ax_twin.set_ylim(-5, 110)
+    ax_right = ax.twinx()
+    ax_right.plot(x, data['Hit_Rate'], marker='o', color='#ff7f0e', linewidth=2.5)
+    ax_right.set_ylabel('Hit Rate (%)', color='#ff7f0e', fontweight='bold')
+    ax_right.tick_params(axis='y', colors='#ff7f0e')
+    ax_right.set_ylim(-5, 110)
 
-    ax.set_xlim(x_val.min() - 0.5, x_val.max() + 0.5)
+    ax.set_xlim(0.5, len(data) + 0.5)
     ax.grid(True, alpha=0.3)
-
-    ax.set_xlabel('Session Number (Strict Posture Phase)', fontweight='bold', labelpad=10)
-    ax.set_xticks(x_val)
-    ax.xaxis.set_major_locator(MaxNLocator(integer=True, prune='both' if len(x_val)>20 else None))
-
-    ax.text(0.02, 0.95, f"Participant {pid}",
-            transform=ax.transAxes, fontsize=13, fontweight='bold',
-            va='top', ha='left', bbox=dict(facecolor='white', edgecolor='none', alpha=0.85), zorder=5)
-
+    ax.set_axisbelow(True)
+    ax.set_xlabel('Game-Run Number (Restricted Posture Phase)', fontweight='bold', labelpad=10)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10))
+    ax.text(0.02, 0.95, f'Participant {participant}', transform=ax.transAxes,
+            fontsize=13, fontweight='bold', va='top', ha='left',
+            bbox=dict(facecolor='white', edgecolor='none', alpha=0.85), zorder=5)
     ax.spines['top'].set_visible(False)
-    ax_twin.spines['top'].set_visible(False)
+    ax_right.spines['top'].set_visible(False)
 
-    legend_elements = [
-        mpatches.Patch(color=color_bar, alpha=0.9, label='Shots per Session'),
-        plt.Line2D([0], [0], color=color_trend, linestyle='--', linewidth=2.5, label='Shots Trend'),
-        plt.Line2D([0], [0], color=color_acc, marker='o', linewidth=2.5, label='Hit Rate (%)')
+    handles = [
+        Patch(color='#aec7e8', alpha=0.9, label='Shots per Game Run'),
+        Line2D([0], [0], color='#1f77b4', linestyle='--', linewidth=2.5,
+               label='Shots Trend (3-Run Mean)'),
+        Line2D([0], [0], color='#ff7f0e', marker='o', linewidth=2.5,
+               label='Hit Rate (%)'),
     ]
-
-    ax.legend(handles=legend_elements, loc='lower center', bbox_to_anchor=(0.5, 1.05),
+    ax.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 1.05),
               ncol=3, framealpha=1.0, edgecolor='black', columnspacing=1.0)
-
-    plt.tight_layout()
-    output_filename = f'train2_total_shots_and_hit_rate_{pid}.png'
-    plt.savefig(output_filename, dpi=300, bbox_inches='tight')
-    print(f"Successfully saved: {output_filename}")
-
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
-print("\nAll individual plots have been exported!")
+
+def main():
+    base_dir = Path(__file__).resolve().parent if '__file__' in globals() else Path.cwd()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data-dir', type=Path, default=base_dir)
+    parser.add_argument('--output-dir', type=Path, default=base_dir)
+    args, _ = parser.parse_known_args()
+
+    setup_style()
+    subjects = {pid: load_data(args.data_dir / f'{pid}_data_train2.csv')
+                for pid in PARTICIPANTS}
+    global_max = max(float(data['Total_Shots'].max()) for data in subjects.values())
+    y_max = max(20, int(math.ceil(global_max / 10) * 10))
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    for pid, data in subjects.items():
+        output = args.output_dir / f'Figure6_DynamicAiming_{pid}.png'
+        plot_figure(pid, data, y_max, output)
+        print(f'Figure 6 {pid}: {len(data)} restricted game runs')
+        print(output)
+
+
+if __name__ == '__main__':
+    main()

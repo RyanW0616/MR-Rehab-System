@@ -7,99 +7,114 @@ Original file is located at
     https://colab.research.google.com/drive/1Zw79UMiax9vdgdqnt9-PzwPI2_N0N_2e
 """
 
-import pandas as pd
-import numpy as np
+from pathlib import Path
+import argparse
+
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 from matplotlib.ticker import MaxNLocator
+import numpy as np
+import pandas as pd
 
-# --- 1. Global font and academic journal formatting ---
-plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['font.sans-serif'] = ['Arial']  # Standard international journal font
-plt.rcParams['axes.unicode_minus'] = False
 
-plt.rcParams.update({
-    'font.size': 12,
-    'axes.labelsize': 14,
-    'xtick.labelsize': 12,
-    'ytick.labelsize': 12,
-    'legend.fontsize': 12
-})
+def setup_style():
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    font = next((name for name in ('Arial', 'Liberation Sans', 'DejaVu Sans') if name in available), 'sans-serif')
+    plt.rcParams.update({
+        'font.family': font,
+        'axes.unicode_minus': False,
+        'font.size': 12,
+        'axes.labelsize': 14,
+        'xtick.labelsize': 12,
+        'ytick.labelsize': 12,
+        'legend.fontsize': 12,
+    })
 
-# --- 2. Load and clean Game 2 data ---
-file_path = 'A001_data_train2.csv'  # Updated filename
-df2 = pd.read_csv(file_path)
 
-# Convert numeric columns
-df2['Total_Shots'] = pd.to_numeric(df2['Total_Shots'], errors='coerce')
-df2['Score'] = pd.to_numeric(df2['Score'], errors='coerce')
+def load_data(path):
+    data = pd.read_csv(path, encoding='utf-8-sig')
+    data.columns = data.columns.str.strip()
+    required = {'Date', 'Total_Shots', 'Score', 'Posture_Rule'}
+    if not required.issubset(data.columns):
+        raise ValueError(f'{path.name}: missing columns {sorted(required - set(data.columns))}')
 
-# Fill missing dates (only the first row of each session has a date)
-df2['Date'] = df2['Date'].ffill()
+    data = data.dropna(how='all').reset_index(drop=True)
+    if data.empty:
+        raise ValueError(f'{path.name}: empty dataset')
 
-# Handle Posture_Rule: blank means Strict (restricted), 'F' means Unrestricted
-df2['Posture_Rule'] = df2['Posture_Rule'].fillna('Strict').replace('F', 'Unrestricted')
+    for column in ('Total_Shots', 'Score'):
+        data[column] = pd.to_numeric(data[column], errors='raise')
 
-# Calculate accuracy
-df2['Accuracy'] = (df2['Score'] / df2['Total_Shots']) * 100
+    if (data['Total_Shots'] <= 0).any() or (data['Score'] < 0).any() or (data['Score'] > data['Total_Shots']).any():
+        raise ValueError(f'{path.name}: invalid shot or score values')
 
-# Add a sequential order column
-df2['Order'] = df2.index + 1
+    flags = data['Posture_Rule'].fillna('').astype(str).str.strip()
+    if not flags.isin(('', 'F')).all():
+        raise ValueError(f'{path.name}: unexpected Posture_Rule values: {sorted(set(flags) - {"", "F"})}')
 
-# --- 3. Plotting function: Methodological correction (Figure 7) ---
-def plot_methodological_correction(data):
+    phases = flags.eq('F').to_numpy()
+    if np.any(np.diff(phases.astype(int)) > 0):
+        raise ValueError(f'{path.name}: posture phases are not in sequence')
+
+    data['Restricted'] = ~phases
+    data['Hit_Rate'] = 100 * data['Score'] / data['Total_Shots']
+    data['Order'] = np.arange(1, len(data) + 1)
+    return data
+
+
+def plot_figure(data, output_path):
     fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
+    before = data.loc[~data['Restricted']]
+    after = data.loc[data['Restricted']]
 
-    # Separate the two phases
-    unrest = data[data['Posture_Rule'] == 'Unrestricted']
-    rest = data[data['Posture_Rule'] == 'Strict']
+    if not before.empty:
+        ax.plot(before['Order'], before['Hit_Rate'], 'o--', color='#D55E00',
+                linewidth=2.5, markersize=7, label='Unrestricted Posture')
+    if not after.empty:
+        ax.plot(after['Order'], after['Hit_Rate'], 's-', color='#0072B2',
+                linewidth=2.5, markersize=7, label='Restricted Posture')
 
-    # Plot Unrestricted Posture (Compensatory phase) - Orange dashed line
-    if not unrest.empty:
-        ax.plot(unrest['Order'], unrest['Accuracy'], marker='o', linestyle='--',
-                color='#D55E00', linewidth=2.5, markersize=7,
-                label='Unrestricted Posture (Compensatory)')
+    if not before.empty and not after.empty:
+        boundary = len(before) + 0.5
+        ax.axvline(boundary, color='#7F7F7F', linestyle=':', linewidth=2)
+        ax.text(boundary - 0.5, 10, 'Posture restriction introduced',
+                rotation=90, va='bottom', ha='right', color='#7F7F7F',
+                fontsize=11, fontweight='bold')
 
-    # Plot Strict Posture (True Motor Control phase) - Blue solid line
-    if not rest.empty:
-        ax.plot(rest['Order'], rest['Accuracy'], marker='s', linestyle='-',
-                color='#0072B2', linewidth=2.5, markersize=7,
-                label='Strict Posture Control (True Motor)')
-
-    # Add vertical line separating the phases
-    if not unrest.empty and not rest.empty:
-        split_point = unrest['Order'].max() + 0.5
-        ax.axvline(x=split_point, color='#7F7F7F', linestyle=':', linewidth=2)
-        ax.text(split_point - 0.5, 10, 'Correction Applied',
-                rotation=90, va='bottom', ha='right', color='#7F7F7F', fontsize=11, fontweight='bold')
-
-    # Axis labels
-    ax.set_xlabel('Cumulative Session Number', fontweight='bold', labelpad=10)
+    ax.set_xlabel('Cumulative Game-Run Number', fontweight='bold', labelpad=10)
     ax.set_ylabel('Hit Rate (%)', fontweight='bold')
-
-    # Participant label inside the plot (top-left)
-    ax.text(0.02, 0.95, "Participant A001",
-            transform=ax.transAxes, fontsize=13, fontweight='bold',
-            va='top', ha='left', bbox=dict(facecolor='white', edgecolor='none', alpha=0.85), zorder=5)
-
-    # Axis limits and ticks
     ax.set_ylim(-5, 105)
-    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-
-    # Remove top and right spines
+    ax.set_xlim(0.5, len(data) + 0.5)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=12))
+    ax.text(0.02, 0.95, 'Participant A001', transform=ax.transAxes,
+            fontsize=13, fontweight='bold', va='top', ha='left',
+            bbox=dict(facecolor='white', edgecolor='none', alpha=0.85), zorder=5)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-
-    # Grid and legend
     ax.grid(True, linestyle='--', alpha=0.4)
     ax.legend(loc='lower right', framealpha=1.0, edgecolor='black')
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
 
-    plt.tight_layout()
 
-    # Save high-resolution figure
-    output_filename = 'Posture_Restriction_Impact_A001.png'
-    plt.savefig(output_filename, dpi=300, bbox_inches='tight')
-    print(f"Successfully saved: {output_filename}")
-    plt.show()
+def main():
+    base_dir = Path(__file__).resolve().parent if '__file__' in globals() else Path.cwd()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data-dir', type=Path, default=base_dir)
+    parser.add_argument('--output-dir', type=Path, default=base_dir)
+    args = parser.parse_args()
 
-# --- 4. Execute ---
-plot_methodological_correction(df2)
+    setup_style()
+    data = load_data(args.data_dir / 'A001_data_train2.csv')
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    output = args.output_dir / 'Figure5_DynamicAiming_A001.png'
+    plot_figure(data, output)
+    print(f'Figure 5: {len(data)} game runs, {int((~data.Restricted).sum())} unrestricted, {int(data.Restricted.sum())} restricted')
+    print(output)
+
+
+if __name__ == '__main__':
+    main()
